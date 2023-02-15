@@ -1,6 +1,5 @@
 package kcp.highway;
 
-import io.netty.util.concurrent.DefaultThreadFactory;
 import kcp.highway.erasure.fec.Fec;
 import io.netty.bootstrap.Bootstrap;
 import io.netty.channel.ChannelFuture;
@@ -34,7 +33,7 @@ public class KcpClient {
      **/
     private IChannelManager channelManager;
     private HashedWheelTimer hashedWheelTimer;
-
+    private HandshakeManager handshakeManager;
 
     /**
      * 定时器线程工厂
@@ -63,6 +62,8 @@ public class KcpClient {
 
         hashedWheelTimer = new HashedWheelTimer(new TimerThreadFactory(), channelConfig.getUseWheelTimer(), TimeUnit.MILLISECONDS);
 
+        handshakeManager = new HandshakeManager(hashedWheelTimer);
+
         bootstrap = new Bootstrap();
         bootstrap.channel(NioDatagramChannel.class);
         bootstrap.group(nioEventLoopGroup);
@@ -76,7 +77,7 @@ public class KcpClient {
                     cp.addLast(crc32Encode);
                     cp.addLast(crc32Decode);
                 }
-                cp.addLast(new ClientChannelHandler(channelManager));
+                cp.addLast(new ClientChannelHandler(channelManager, handshakeManager));
             }
         });
 
@@ -121,15 +122,32 @@ public class KcpClient {
         Ukcp ukcp = new Ukcp(kcpOutput, kcpListener, iMessageExecutor, channelConfig, channelManager);
         ukcp.user(user);
 
-        channelManager.newConnect(localAddress, ukcp, null);
-        iMessageExecutor.execute(() -> {
-            try {
-                ukcp.getKcpListener().onConnected(ukcp);
-            } catch (Throwable throwable) {
-                ukcp.getKcpListener().handleException(throwable, ukcp);
+        InetSocketAddress finalLocalAddress = localAddress;
+        handshakeManager.newHandshake(user, () -> {
+            int enet = 1; // what enet?
+            Ukcp.sendHandshakeRep(user, enet, ukcp.getConv());
+            return null;
+        }, success -> {
+            if(success) {
+                channelManager.newConnect(finalLocalAddress, ukcp, null);
+                iMessageExecutor.execute(() -> {
+                    try {
+                        ukcp.getKcpListener().onConnected(ukcp);
+                    } catch (Throwable throwable) {
+                        ukcp.getKcpListener().handleException(throwable, ukcp);
+                    }
+                });
+            }else{
+                iMessageExecutor.execute(() -> {
+                    ukcp.close(false);
+                    try {
+                        ukcp.getKcpListener().handleClose(ukcp);
+                    } catch (Throwable throwable) {
+                        ukcp.getKcpListener().handleException(throwable, ukcp);
+                    }
+                });
             }
         });
-
         ScheduleTask scheduleTask = new ScheduleTask(iMessageExecutor, ukcp, hashedWheelTimer);
         hashedWheelTimer.newTimeout(scheduleTask, ukcp.getInterval(), TimeUnit.MILLISECONDS);
         return ukcp;
@@ -147,6 +165,9 @@ public class KcpClient {
                 throwable.printStackTrace();
             }
         });
+        if(handshakeManager != null){
+            handshakeManager.release();
+        }
         if (iMessageExecutorPool != null) {
             iMessageExecutorPool.stop();
         }

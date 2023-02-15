@@ -142,6 +142,16 @@ public class Ukcp {
         UDPSend(packet);
     }
 
+    public static void sendHandshakeRep(User user, int enet, long conv) {
+        ByteBuf packet = Unpooled.buffer(20);
+        packet.writeInt(255);
+        packet.writeIntLE((int) (conv >> 32));
+        packet.writeIntLE((int) (conv & 0xFFFFFFFFL));
+        packet.writeInt(enet);
+        packet.writeInt(340870469); // constant? //todo wait confirm magic constant
+        Ukcp.UDPSend(packet, user);
+    }
+
     public static void sendHandshakeRsp(User user, int enet, long conv) {
         ByteBuf packet = Unpooled.buffer(20);
         packet.writeInt(325);
